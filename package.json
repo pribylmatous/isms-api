@@ -1,0 +1,20 @@
+{
+  "name": "isms-api",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "seed": "node src/seed.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "exceljs": "^4.4.0",
+    "express": "^5.1.0",
+    "multer": "^2.2.0",
+    "nodemailer": "^9.0.3",
+    "openid-client": "^6.8.4"
+  }
+}
