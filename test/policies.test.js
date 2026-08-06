@@ -19,8 +19,8 @@ describe('knihovna dokumentů — ukládání souborů', () => {
 
   before(async () => {
     ctx = await startTestServer();
-    createUser(ctx.db, { username: 'editor', name: 'Editor', role: 'editor', password: 'Heslo.123' });
-    createUser(ctx.db, { username: 'manazer', name: 'Manažerka', role: 'manager', password: 'Heslo.123' });
+    await createUser(ctx.db, { username: 'editor', name: 'Editor', role: 'editor', password: 'Heslo.123' });
+    await createUser(ctx.db, { username: 'manazer', name: 'Manažerka', role: 'manager', password: 'Heslo.123' });
     await ctx.client.login('editor', 'Heslo.123');
   });
 
@@ -52,7 +52,7 @@ describe('knihovna dokumentů — ukládání souborů', () => {
     assert.equal(res.body.file_name, 'zaloha.pdf');
     assert.equal(res.body.file_size, Buffer.byteLength('obsah testovacího dokumentu', 'utf8'));
 
-    const row = ctx.db.prepare('SELECT file_stored FROM policies WHERE id = ?').get(res.body.id);
+    const row = await ctx.db.prepare('SELECT file_stored FROM policies WHERE id = ?').get(res.body.id);
     assert.ok(row.file_stored, 'file_stored by mělo být nastavené');
     assert.ok(existsSync(path.join(uploadDir, row.file_stored)), 'soubor by měl existovat na disku');
 
@@ -68,7 +68,7 @@ describe('knihovna dokumentů — ukládání souborů', () => {
     fd1.set('owner', 'SOC tým');
     fd1.set('file', new Blob(['verze 1'], { type: 'application/pdf' }), 'v1.pdf');
     const created = await ctx.client.post('/api/policies', fd1);
-    const oldStored = ctx.db.prepare('SELECT file_stored FROM policies WHERE id = ?').get(created.body.id).file_stored;
+    const oldStored = (await ctx.db.prepare('SELECT file_stored FROM policies WHERE id = ?').get(created.body.id)).file_stored;
     assert.ok(existsSync(path.join(uploadDir, oldStored)));
 
     const fd2 = new FormData();
@@ -83,7 +83,7 @@ describe('knihovna dokumentů — ukládání souborů', () => {
     assert.equal(updated.body.file_name, 'v2.pdf');
 
     assert.equal(existsSync(path.join(uploadDir, oldStored)), false, 'starý soubor by měl být smazaný');
-    const newStored = ctx.db.prepare('SELECT file_stored FROM policies WHERE id = ?').get(created.body.id).file_stored;
+    const newStored = (await ctx.db.prepare('SELECT file_stored FROM policies WHERE id = ?').get(created.body.id)).file_stored;
     assert.ok(existsSync(path.join(uploadDir, newStored)));
   });
 
@@ -117,7 +117,7 @@ describe('knihovna dokumentů — ukládání souborů', () => {
     fd.set('owner', 'SOC tým');
     fd.set('file', new Blob(['ke smazání'], { type: 'application/pdf' }), 'smazat.pdf');
     const created = await ctx.client.post('/api/policies', fd);
-    const stored = ctx.db.prepare('SELECT file_stored FROM policies WHERE id = ?').get(created.body.id).file_stored;
+    const stored = (await ctx.db.prepare('SELECT file_stored FROM policies WHERE id = ?').get(created.body.id)).file_stored;
 
     await ctx.client.login('manazer', 'Heslo.123'); // DELETE vyžaduje roli manager
     const del = await ctx.client.del(`/api/policies/${created.body.id}`);
@@ -136,7 +136,7 @@ describe('knihovna dokumentů — ukládání souborů', () => {
     const res = await ctx.client.post('/api/policies', fd);
     assert.equal(res.status, 400);
     assert.equal(filesOnDisk().length, before_);
-    const row = ctx.db.prepare("SELECT * FROM policies WHERE name = 'Škodlivý soubor'").get();
+    const row = await ctx.db.prepare("SELECT * FROM policies WHERE name = 'Škodlivý soubor'").get();
     assert.equal(row, undefined);
   });
 });

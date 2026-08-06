@@ -7,9 +7,9 @@ describe('správa uživatelů (jen manažer)', () => {
 
   before(async () => {
     ctx = await startTestServer();
-    createUser(ctx.db, { username: 'reader', name: 'Čtenář', role: 'reader', password: 'Heslo.123' });
-    createUser(ctx.db, { username: 'manager', name: 'Manažerka', role: 'manager', password: 'Heslo.123' });
-    createUser(ctx.db, { username: 'manager2', name: 'Manažer Druhý', role: 'manager', password: 'Heslo.123' });
+    await createUser(ctx.db, { username: 'reader', name: 'Čtenář', role: 'reader', password: 'Heslo.123' });
+    await createUser(ctx.db, { username: 'manager', name: 'Manažerka', role: 'manager', password: 'Heslo.123' });
+    await createUser(ctx.db, { username: 'manager2', name: 'Manažer Druhý', role: 'manager', password: 'Heslo.123' });
   });
 
   after(() => ctx.close());
@@ -100,7 +100,7 @@ describe('správa uživatelů (jen manažer)', () => {
     const created = await ctx.client.post('/api/users', { username: 'kdeaktivaci', name: 'D', role: 'reader', password: 'HesloProDeakt1' });
     await ctx.client.put(`/api/users/${created.body.id}`, { active: false });
 
-    const check = ctx.db.prepare('SELECT COUNT(*) AS n FROM sessions WHERE user_id = ?').get(created.body.id);
+    const check = await ctx.db.prepare('SELECT COUNT(*) AS n FROM sessions WHERE user_id = ?').get(created.body.id);
     assert.equal(check.n, 0, 'session by měla být smazána při deaktivaci');
 
     const loginAttempt = await ctx.client.post('/api/auth/login', { username: 'kdeaktivaci', password: 'HesloProDeakt1' });
@@ -113,7 +113,7 @@ describe('správa uživatelů (jen manažer)', () => {
     const created = await ctx.client.post('/api/users', { username: 'proaudit', name: 'Pro Audit', role: 'reader', password: 'HesloProAudit1' });
     await ctx.client.put(`/api/users/${created.body.id}`, { name: 'Přejmenováno' });
 
-    const log = ctx.db.prepare("SELECT * FROM audit_log WHERE entity = 'user' AND entity_id = ? ORDER BY id").all(String(created.body.id));
+    const log = await ctx.db.prepare("SELECT * FROM audit_log WHERE entity = 'user' AND entity_id = ? ORDER BY id").all(String(created.body.id));
     assert.equal(log.length, 2);
     assert.equal(log[0].action, 'create');
     assert.equal(log[1].action, 'update');

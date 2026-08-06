@@ -45,30 +45,30 @@ export function createNotifier(db) {
   }
 
   // Výchozí příjemci: manažeři ISMS + volitelně settings.notify_recipients (čárkami)
-  function defaultRecipients() {
-    const managers = db.prepare(
+  async function defaultRecipients() {
+    const managers = (await db.prepare(
       "SELECT email FROM users WHERE role = 'manager' AND email IS NOT NULL",
-    ).all().map((r) => r.email);
-    const extra = db.prepare("SELECT value FROM settings WHERE key = 'notify_recipients'").get()?.value ?? '';
+    ).all()).map((r) => r.email);
+    const extra = (await db.prepare("SELECT value FROM settings WHERE key = 'notify_recipients'").get())?.value ?? '';
     return [...new Set([...managers, ...extra.split(',').map((s) => s.trim()).filter(Boolean)])];
   }
 
-  function notify(event, subject, lines, recipients = null) {
-    const to = filterAllowed(recipients?.length ? recipients : defaultRecipients());
+  async function notify(event, subject, lines, recipients = null) {
+    const to = filterAllowed(recipients?.length ? recipients : await defaultRecipients());
     if (to.length === 0) return;
     const body = lines.filter(Boolean).join('\n');
     const bodyHtml = renderNotificationEmail({ event, subject, lines });
-    db.prepare('INSERT INTO notifications (event, recipients, subject, body, body_html) VALUES (?, ?, ?, ?, ?)')
-      .run(event, to.join(', '), `[ISMS] ${subject}`, body, bodyHtml);
+    await db.prepare('INSERT INTO notifications (event, recipients, subject, body, body_html, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(event, to.join(', '), `[ISMS] ${subject}`, body, bodyHtml, new Date().toISOString());
   }
 
   async function processOutbox() {
-    const pending = db.prepare(
+    const pending = await db.prepare(
       "SELECT * FROM notifications WHERE status = 'pending' ORDER BY id LIMIT 20",
     ).all();
     for (const n of pending) {
       if (!transport) {
-        db.prepare("UPDATE notifications SET status = 'logged', sent_at = datetime('now') WHERE id = ?").run(n.id);
+        await db.prepare("UPDATE notifications SET status = 'logged', sent_at = ? WHERE id = ?").run(new Date().toISOString(), n.id);
         console.log(`[notifikace/dev] ${n.subject} → ${n.recipients}\n${n.body}\n`);
         continue;
       }
@@ -77,9 +77,9 @@ export function createNotifier(db) {
           from, to: n.recipients, subject: n.subject, text: n.body,
           ...(n.body_html ? { html: n.body_html } : {}),
         });
-        db.prepare("UPDATE notifications SET status = 'sent', sent_at = datetime('now') WHERE id = ?").run(n.id);
+        await db.prepare("UPDATE notifications SET status = 'sent', sent_at = ? WHERE id = ?").run(new Date().toISOString(), n.id);
       } catch (err) {
-        db.prepare(
+        await db.prepare(
           `UPDATE notifications SET attempts = attempts + 1, error = ?,
            status = CASE WHEN attempts + 1 >= ${MAX_ATTEMPTS} THEN 'failed' ELSE 'pending' END WHERE id = ?`,
         ).run(String(err.message), n.id);
@@ -88,20 +88,20 @@ export function createNotifier(db) {
   }
 
   // Denní souhrn termínů — spustí se při prvním zpracování daného dne
-  function runDailyDigest() {
+  async function runDailyDigest() {
     const today = new Date().toISOString().slice(0, 10);
-    const last = db.prepare("SELECT value FROM settings WHERE key = 'notify_digest_last_run'").get()?.value;
+    const last = (await db.prepare("SELECT value FROM settings WHERE key = 'notify_digest_last_run'").get())?.value;
     if (last === today) return;
 
-    const overdue = db.prepare(
+    const overdue = await db.prepare(
       "SELECT id, finding, due, owner FROM audit_findings WHERE status != 'Uzavřeno' AND (status = 'Po termínu' OR due < ?) ORDER BY due",
     ).all(today);
     const in30 = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
-    const reviews = db.prepare(
+    const reviews = await db.prepare(
       'SELECT id, name, review_due FROM controls WHERE review_due IS NOT NULL AND review_due <= ? ORDER BY review_due',
     ).all(in30);
     const in7 = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
-    const deadlines = db.prepare(
+    const deadlines = await db.prepare(
       'SELECT title, owner, due FROM deadlines WHERE due BETWEEN ? AND ? ORDER BY due',
     ).all(today, in7);
 
@@ -119,16 +119,17 @@ export function createNotifier(db) {
       lines.push(...deadlines.map((d) => `  • ${d.due} ${d.title} (${d.owner})`));
     }
 
-    if (lines.length) notify('digest.daily', 'Denní přehled termínů ISMS', lines);
-    db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('notify_digest_last_run', today);
+    if (lines.length) await notify('digest.daily', 'Denní přehled termínů ISMS', lines);
+    await db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value')
+      .run('notify_digest_last_run', today);
   }
 
   function start() {
-    runDailyDigest();
-    processOutbox();
+    runDailyDigest().catch((err) => console.error('[notifikace] runDailyDigest selhal:', err));
+    processOutbox().catch((err) => console.error('[notifikace] processOutbox selhal:', err));
     setInterval(() => {
-      runDailyDigest();
-      processOutbox();
+      runDailyDigest().catch((err) => console.error('[notifikace] runDailyDigest selhal:', err));
+      processOutbox().catch((err) => console.error('[notifikace] processOutbox selhal:', err));
     }, 30_000).unref();
     console.log(smtpConfigured
       ? `Notifikace: SMTP ${process.env.SMTP_HOST} (odesílatel ${from})`

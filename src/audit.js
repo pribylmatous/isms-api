@@ -19,16 +19,16 @@ export function diffRows(before, after) {
 }
 
 export function createAuditLog(db) {
-  function record(req, { entity, entityId, action, before = null, after = null, label }) {
+  async function record(req, { entity, entityId, action, before = null, after = null, label }) {
     let changes = null;
     if (action === 'update') {
       const diff = diffRows(before, after);
       if (Object.keys(diff).length === 0) return; // nic se ve skutečnosti nezměnilo
       changes = JSON.stringify(diff);
     }
-    db.prepare(`INSERT INTO audit_log (user_id, user_name, entity, entity_id, action, label, changes)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`)
-      .run(req.user?.id ?? null, req.user?.name ?? null, entity, String(entityId), action, label ?? null, changes);
+    await db.prepare(`INSERT INTO audit_log (user_id, user_name, entity, entity_id, action, label, changes, at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(req.user?.id ?? null, req.user?.name ?? null, entity, String(entityId), action, label ?? null, changes, new Date().toISOString());
   }
 
   return { record };

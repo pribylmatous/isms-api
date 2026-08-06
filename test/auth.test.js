@@ -7,9 +7,9 @@ describe('přihlášení a role', () => {
 
   before(async () => {
     ctx = await startTestServer();
-    createUser(ctx.db, { username: 'ctenar', name: 'Čtenář', role: 'reader', password: 'Heslo.123' });
-    createUser(ctx.db, { username: 'editor', name: 'Editor', role: 'editor', password: 'Heslo.123' });
-    createUser(ctx.db, { username: 'manazer', name: 'Manažerka', role: 'manager', password: 'Heslo.123' });
+    await createUser(ctx.db, { username: 'ctenar', name: 'Čtenář', role: 'reader', password: 'Heslo.123' });
+    await createUser(ctx.db, { username: 'editor', name: 'Editor', role: 'editor', password: 'Heslo.123' });
+    await createUser(ctx.db, { username: 'manazer', name: 'Manažerka', role: 'manager', password: 'Heslo.123' });
   });
 
   after(() => ctx.close());
@@ -74,8 +74,8 @@ describe('přihlášení a role', () => {
   });
 
   test('deaktivovaný účet se nepřihlásí, i se správným heslem', async () => {
-    createUser(ctx.db, { username: 'deaktivovany', name: 'Deaktivovaný', role: 'reader', password: 'Heslo.123' });
-    ctx.db.prepare("UPDATE users SET active = 0 WHERE username = 'deaktivovany'").run();
+    await createUser(ctx.db, { username: 'deaktivovany', name: 'Deaktivovaný', role: 'reader', password: 'Heslo.123' });
+    await ctx.db.prepare("UPDATE users SET active = 0 WHERE username = 'deaktivovany'").run();
     const res = await ctx.client.post('/api/auth/login', { username: 'deaktivovany', password: 'Heslo.123' });
     assert.equal(res.status, 401);
   });

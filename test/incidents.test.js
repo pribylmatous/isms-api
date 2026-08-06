@@ -7,11 +7,11 @@ describe('řízení incidentů bezpečnosti informací (ITIL, A.5.24–A.5.30)',
 
   before(async () => {
     ctx = await startTestServer();
-    createUser(ctx.db, { username: 'editor', name: 'Editor', role: 'editor', password: 'Heslo.123' });
-    createUser(ctx.db, { username: 'manazer', name: 'Manažerka', role: 'manager', password: 'Heslo.123' });
-    createUser(ctx.db, { username: 'ctenar', name: 'Čtenář', role: 'reader', password: 'Heslo.123' });
-    ctx.db.prepare("INSERT INTO controls (id, name, domain, status, owner) VALUES ('A.5.26', 'Reakce na incidenty', 'Organizační', 'Zavedeno', 'SOC')").run();
-    ctx.db.prepare("INSERT INTO risks (id, name, asset, score, level, owner) VALUES ('R-01', 'Test riziko', 'Aktivum', 9, 'Vysoké', 'SOC')").run();
+    await createUser(ctx.db, { username: 'editor', name: 'Editor', role: 'editor', password: 'Heslo.123' });
+    await createUser(ctx.db, { username: 'manazer', name: 'Manažerka', role: 'manager', password: 'Heslo.123' });
+    await createUser(ctx.db, { username: 'ctenar', name: 'Čtenář', role: 'reader', password: 'Heslo.123' });
+    await ctx.db.prepare("INSERT INTO controls (id, name, domain, status, owner, updated_at) VALUES ('A.5.26', 'Reakce na incidenty', 'Organizační', 'Zavedeno', 'SOC', ?)").run(new Date().toISOString());
+    await ctx.db.prepare("INSERT INTO risks (id, name, asset, score, level, owner, created_at, updated_at) VALUES ('R-01', 'Test riziko', 'Aktivum', 9, 'Vysoké', 'SOC', ?, ?)").run(new Date().toISOString(), new Date().toISOString());
   });
 
   after(() => ctx.close());
@@ -57,9 +57,9 @@ describe('řízení incidentů bezpečnosti informací (ITIL, A.5.24–A.5.30)',
   });
 
   test('smazání linkovaného opatření nastaví control_id na null', async () => {
-    ctx.db.prepare("INSERT INTO controls (id, name, domain, status, owner) VALUES ('A.5.99', 'Zaniklé opatření', 'Organizační', 'Zavedeno', 'SOC')").run();
+    await ctx.db.prepare("INSERT INTO controls (id, name, domain, status, owner, updated_at) VALUES ('A.5.99', 'Zaniklé opatření', 'Organizační', 'Zavedeno', 'SOC', ?)").run(new Date().toISOString());
     const created = await ctx.client.post('/api/incidents', { ...need(), control_id: 'A.5.99' });
-    ctx.db.prepare("DELETE FROM controls WHERE id = 'A.5.99'").run();
+    await ctx.db.prepare("DELETE FROM controls WHERE id = 'A.5.99'").run();
 
     const list = await ctx.client.get('/api/incidents');
     const found = list.body.find((i) => i.id === created.body.id);

@@ -1,27 +1,36 @@
 # ISMS API
 
-Backend ISMS portálu — Node.js (Express 5) + SQLite (vestavěný modul `node:sqlite`,
-žádné nativní závislosti). Data z prototypu jsou převedena seedem do databáze `isms.db`.
+Backend ISMS portálu — Node.js (Express 5) + PostgreSQL (`pg`). Data z prototypu
+jsou převedena seedem do databáze.
 
 ## Spuštění
 
 ```bash
 npm install
-npm run seed   # vytvoří/naplní isms.db daty z prototypu (idempotentní)
+# Postgres musí běžet a DATABASE_URL v .env ukazovat na prázdnou/existující DB —
+# schéma (src/schema.sql) se založí samo při startu (openDb() je idempotentní).
+npm run seed   # vytvoří/naplní DB daty z prototypu (idempotentní — tabulky vyprázdní a naplní znovu)
 npm run dev    # server s auto-restartem na http://localhost:3001
 ```
 
-Konfigurace: `PORT` (výchozí 3001), `ISMS_DB` (cesta k DB souboru).
+Konfigurace: `PORT` (výchozí 3001), `DATABASE_URL` (`postgres://user:pass@host:5432/isms`).
+
+Existující SQLite `isms.db` z dřívější verze lze jednorázově převést pomocí
+`node src/migrate-sqlite-to-pg.js [cesta-k-isms.db]` (viz komentář v souboru).
 
 ## Testy
 
 ```bash
-npm test   # node --test — vestavěný test runner, žádná další závislost
+npm test   # node --test --test-concurrency=1 — vestavěný test runner, žádná další závislost
 ```
 
-Testy (`test/*.test.js`) běží proti skutečné Express aplikaci (`src/app.js`,
-oddělené od síťového naslouchání v `server.js`) a čerstvé in-memory SQLite DB
-(`openDb(':memory:')`) — žádné mockování. Pokrývají:
+Testy potřebují samostatnou `TEST_DATABASE_URL` (v `.env`) — **ne** stejnou DB jako
+`DATABASE_URL`, protože `test/helpers.js` před každým použitím všechny tabulky
+vyprázdní. Testy (`test/*.test.js`) běží proti skutečné Express aplikaci
+(`src/app.js`, oddělené od síťového naslouchání v `server.js`) — žádné mockování.
+`--test-concurrency=1` je nutné, protože na rozdíl od dřívějšího SQLite
+(`openDb(':memory:')`, plná izolace na soubor) teď všechny testovací soubory sdílí
+jednu Postgres DB, kterou si každý navzájem promazává. Pokrývají:
 
 - **`scoring.test.js`** — čisté funkce `levelOf`/`domainCompliance` (`src/scoring.js`).
 - **`auth.test.js`** — přihlášení/odhlášení, 401 bez session, role guardy (403),
@@ -61,8 +70,10 @@ a jednoduchého klienta, který si mezi requesty drží session cookie jako proh
 | `deadlines` | Nejbližší termíny | pro dashboard |
 | `settings` | Konfigurace | termín recertifikace, cíl shody |
 
-Datumy jsou v ISO 8601 (`YYYY-MM-DD`) — seed je převádí z českého formátu návrhu.
-Stavy hlídají `CHECK` constrainty. Schéma je přenositelné na PostgreSQL/SQL Server.
+Datumy/časová razítka jsou `TEXT` v ISO 8601 — seed je převádí z českého formátu
+návrhu; `created_at`/`updated_at`/`at` apod. appka vždy generuje v JS
+(`new Date().toISOString()`) a posílá jako parametr, ne jako SQL default (Postgres
+nemá SQLite `datetime('now')`). Stavy hlídají `CHECK` constrainty.
 
 ## Přihlašování a role
 
@@ -295,6 +306,7 @@ přejmenování rizika beze změny stavu). Vidí ji jen `manager`, na
 
 ## Další kroky
 
-1. Napojit React frontend na toto API (nahradit `useStoredState` fetchem).
-2. Autentizace (SSO Entra ID) + role.
-3. Přechod na PostgreSQL, až bude potřeba víc uživatelů najednou.
+Frontend napojen, SSO (Entra ID, viz `src/sso.js`) i přechod na PostgreSQL hotové.
+Zbývá z pre-prod seznamu: rate limiting na `/api/auth/login`, zrušení/rotace
+lokálních dev účtů, reálné SMTP, produkční build + hosting frontendu, TLS,
+proces supervisor místo `node --watch`, monitoring.

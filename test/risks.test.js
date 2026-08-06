@@ -7,10 +7,10 @@ describe('registr rizik — skóre a notifikace', () => {
 
   before(async () => {
     ctx = await startTestServer();
-    createUser(ctx.db, {
+    await createUser(ctx.db, {
       username: 'editor', name: 'Editor', role: 'editor', password: 'Heslo.123', email: 'editor@expect-it.cz',
     });
-    createUser(ctx.db, {
+    await createUser(ctx.db, {
       username: 'manazer', name: 'Manažerka', role: 'manager', password: 'Heslo.123', email: 'manazer@expect-it.cz',
     });
   });
@@ -21,7 +21,7 @@ describe('registr rizik — skóre a notifikace', () => {
     await ctx.client.login('editor', 'Heslo.123');
   });
 
-  const notificationsFor = (event) => ctx.db.prepare('SELECT * FROM notifications WHERE event = ? ORDER BY id').all(event);
+  const notificationsFor = async (event) => (await ctx.db.prepare('SELECT * FROM notifications WHERE event = ? ORDER BY id').all(event));
 
   test('skóre a úroveň počítá server (pravděpodobnost × dopad)', async () => {
     const res = await ctx.client.post('/api/risks', {
@@ -33,12 +33,12 @@ describe('registr rizik — skóre a notifikace', () => {
   });
 
   test('nový vysoký rizikový záznam pošle notifikaci risk.created, ne risk.escalated', async () => {
-    const before_ = notificationsFor('risk.created').length;
+    const before_ = (await notificationsFor('risk.created')).length;
     await ctx.client.post('/api/risks', {
       name: 'Riziko B', asset: 'Aktivum B', probability: 4, impact: 4, owner: 'M. Novák',
     });
-    assert.equal(notificationsFor('risk.created').length, before_ + 1);
-    assert.equal(notificationsFor('risk.escalated').length, 0);
+    assert.equal((await notificationsFor('risk.created')).length, before_ + 1);
+    assert.equal((await notificationsFor('risk.escalated')).length, 0);
   });
 
   test('eskalace na Vysoké při úpravě pošle risk.escalated, ale jen jednou', async () => {
@@ -49,11 +49,11 @@ describe('registr rizik — skóre a notifikace', () => {
 
     const escalated = await ctx.client.put(`/api/risks/${created.body.id}`, { probability: 4, impact: 4 });
     assert.equal(escalated.body.level, 'Vysoké');
-    assert.equal(notificationsFor('risk.escalated').length, 1);
+    assert.equal((await notificationsFor('risk.escalated')).length, 1);
 
     // Zůstane-li Vysoké, notifikace se znovu neposílá (jen na *přechod* do Vysoké)
     await ctx.client.put(`/api/risks/${created.body.id}`, { probability: 4, impact: 3 });
-    assert.equal(notificationsFor('risk.escalated').length, 1);
+    assert.equal((await notificationsFor('risk.escalated')).length, 1);
   });
 
   test('uzavření rizika pošle risk.closed', async () => {
@@ -61,7 +61,7 @@ describe('registr rizik — skóre a notifikace', () => {
       name: 'Riziko D', asset: 'Aktivum D', probability: 1, impact: 1, owner: 'SOC tým',
     });
     await ctx.client.put(`/api/risks/${created.body.id}`, { status: 'Uzavřené' });
-    assert.equal(notificationsFor('risk.closed').length, 1);
+    assert.equal((await notificationsFor('risk.closed')).length, 1);
   });
 
   test('smazání rizika (manažerem) pošle risk.deleted', async () => {
@@ -71,7 +71,7 @@ describe('registr rizik — skóre a notifikace', () => {
     await ctx.client.login('manazer', 'Heslo.123');
     const del = await ctx.client.del(`/api/risks/${created.body.id}`);
     assert.equal(del.status, 204);
-    assert.equal(notificationsFor('risk.deleted').length, 1);
+    assert.equal((await notificationsFor('risk.deleted')).length, 1);
   });
 
   test('chybějící povinné pole vrací 400', async () => {

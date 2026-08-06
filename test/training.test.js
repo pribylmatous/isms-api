@@ -14,16 +14,16 @@ describe('interaktivní školení (kvíz)', () => {
 
   before(async () => {
     ctx = await startTestServer();
-    createUser(ctx.db, { username: 'alice', name: 'Alice', role: 'reader', password: 'Heslo.123' });
-    createUser(ctx.db, { username: 'bob', name: 'Bob', role: 'reader', password: 'Heslo.123' });
+    await createUser(ctx.db, { username: 'alice', name: 'Alice', role: 'reader', password: 'Heslo.123' });
+    await createUser(ctx.db, { username: 'bob', name: 'Bob', role: 'reader', password: 'Heslo.123' });
 
-    quizTrainingId = ctx.db.prepare(
-      'INSERT INTO trainings (name, audience, due, pct, content) VALUES (?, ?, ?, ?, ?)',
-    ).run('Testovací kvíz', 'Uživatelé portálu', '2026-12-31', 0, JSON.stringify(QUIZ)).lastInsertRowid;
+    quizTrainingId = (await ctx.db.prepare(
+      'INSERT INTO trainings (name, audience, due, pct, content) VALUES (?, ?, ?, ?, ?) RETURNING id',
+    ).get('Testovací kvíz', 'Uživatelé portálu', '2026-12-31', 0, JSON.stringify(QUIZ))).id;
 
-    staticTrainingId = ctx.db.prepare(
-      'INSERT INTO trainings (name, audience, due, pct) VALUES (?, ?, ?, ?)',
-    ).run('Statické školení', 'Všichni', '2026-12-31', 42).lastInsertRowid;
+    staticTrainingId = (await ctx.db.prepare(
+      'INSERT INTO trainings (name, audience, due, pct) VALUES (?, ?, ?, ?) RETURNING id',
+    ).get('Statické školení', 'Všichni', '2026-12-31', 42)).id;
 
     await ctx.client.login('alice', 'Heslo.123');
   });
@@ -76,7 +76,7 @@ describe('interaktivní školení (kvíz)', () => {
 
   test('opakování přepíše skóre (upsert), nevytvoří duplicitní záznam', async () => {
     await ctx.client.post(`/api/trainings/${quizTrainingId}/complete`, { answers: [0, 0] }); // teď špatně
-    const rows = ctx.db.prepare('SELECT * FROM training_completions WHERE training_id = ? AND user_id = (SELECT id FROM users WHERE username = ?)')
+    const rows = await ctx.db.prepare('SELECT * FROM training_completions WHERE training_id = ? AND user_id = (SELECT id FROM users WHERE username = ?)')
       .all(quizTrainingId, 'alice');
     assert.equal(rows.length, 1);
     assert.equal(rows[0].score, 50);
@@ -106,9 +106,9 @@ describe('administrace školení (jen manažer)', () => {
 
   before(async () => {
     ctx = await startTestServer();
-    createUser(ctx.db, { username: 'reader', name: 'Čtenář', role: 'reader', password: 'Heslo.123' });
-    createUser(ctx.db, { username: 'editor', name: 'Editor', role: 'editor', password: 'Heslo.123' });
-    createUser(ctx.db, { username: 'manager', name: 'Manažerka', role: 'manager', password: 'Heslo.123' });
+    await createUser(ctx.db, { username: 'reader', name: 'Čtenář', role: 'reader', password: 'Heslo.123' });
+    await createUser(ctx.db, { username: 'editor', name: 'Editor', role: 'editor', password: 'Heslo.123' });
+    await createUser(ctx.db, { username: 'manager', name: 'Manažerka', role: 'manager', password: 'Heslo.123' });
   });
 
   after(() => ctx.close());
@@ -281,7 +281,7 @@ describe('administrace školení (jen manažer)', () => {
     const del = await ctx.client.del(`/api/trainings/${created.body.id}`);
     assert.equal(del.status, 204);
 
-    const remaining = ctx.db.prepare('SELECT * FROM training_completions WHERE training_id = ?').all(created.body.id);
+    const remaining = await ctx.db.prepare('SELECT * FROM training_completions WHERE training_id = ?').all(created.body.id);
     assert.equal(remaining.length, 0);
   });
 });

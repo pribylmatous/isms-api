@@ -7,12 +7,12 @@ describe('řízení změn (ITIL, A.8.32)', () => {
 
   before(async () => {
     ctx = await startTestServer();
-    createUser(ctx.db, { username: 'editor', name: 'Editor', role: 'editor', password: 'Heslo.123' });
-    createUser(ctx.db, { username: 'manazer', name: 'Manažerka', role: 'manager', password: 'Heslo.123' });
-    createUser(ctx.db, { username: 'ctenar', name: 'Čtenář', role: 'reader', password: 'Heslo.123' });
+    await createUser(ctx.db, { username: 'editor', name: 'Editor', role: 'editor', password: 'Heslo.123' });
+    await createUser(ctx.db, { username: 'manazer', name: 'Manažerka', role: 'manager', password: 'Heslo.123' });
+    await createUser(ctx.db, { username: 'ctenar', name: 'Čtenář', role: 'reader', password: 'Heslo.123' });
     // testovací opatření a riziko pro vazby
-    ctx.db.prepare("INSERT INTO controls (id, name, domain, status, owner) VALUES ('A.8.32', 'Řízení změn', 'Technologická', 'Zavedeno', 'IT')").run();
-    ctx.db.prepare("INSERT INTO risks (id, name, asset, score, level, owner) VALUES ('R-01', 'Test riziko', 'Aktivum', 4, 'Nízké', 'IT')").run();
+    await ctx.db.prepare("INSERT INTO controls (id, name, domain, status, owner, updated_at) VALUES ('A.8.32', 'Řízení změn', 'Technologická', 'Zavedeno', 'IT', ?)").run(new Date().toISOString());
+    await ctx.db.prepare("INSERT INTO risks (id, name, asset, score, level, owner, created_at, updated_at) VALUES ('R-01', 'Test riziko', 'Aktivum', 4, 'Nízké', 'IT', ?, ?)").run(new Date().toISOString(), new Date().toISOString());
   });
 
   after(() => ctx.close());
@@ -52,7 +52,7 @@ describe('řízení změn (ITIL, A.8.32)', () => {
   });
 
   test('smazání linkovaného rizika nastaví risk_id na null (ON DELETE SET NULL)', async () => {
-    ctx.db.prepare("INSERT INTO risks (id, name, asset, score, level, owner) VALUES ('R-02', 'Zaniklé riziko', 'Aktivum', 4, 'Nízké', 'IT')").run();
+    await ctx.db.prepare("INSERT INTO risks (id, name, asset, score, level, owner, created_at, updated_at) VALUES ('R-02', 'Zaniklé riziko', 'Aktivum', 4, 'Nízké', 'IT', ?, ?)").run(new Date().toISOString(), new Date().toISOString());
     const created = await ctx.client.post('/api/changes', {
       title: 'Změna s rizikem k zániku', type: 'Normální', risk_level: 'Nízké', owner: 'IT', risk_id: 'R-02',
     });

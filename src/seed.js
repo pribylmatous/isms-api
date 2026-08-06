@@ -1,9 +1,11 @@
 // Převod stávajících dat prototypu (isms-portal-react/src/data.js) do SQLite.
 // Spuštění: npm run seed  (idempotentní — tabulky vyprázdní a naplní znovu)
 
-import { openDb, DB_PATH } from './db.js';
+import { openDb, TABLE_ORDER } from './db.js';
 import { hashPassword } from './auth.js';
 import { CATALOG } from './catalog.js';
+
+const now = () => new Date().toISOString();
 
 // '02.08.2026' → '2026-08-02'
 const czToIso = (cz) => {
@@ -188,84 +190,76 @@ const USERS = [
   ['zamestnanec', 'Testovací zaměstnanec', 'Zaměstnanec', 'mpribyl@expect-it.cz', 'reader', 'Cdv.2026'],
 ];
 
-const db = openDb();
+const db = await openDb();
 
-db.exec('BEGIN');
-try {
-  for (const t of [
-    'controls', 'risks', 'policies', 'audit_findings', 'changes', 'incidents',
-    'trainings', 'faqs', 'deadlines', 'settings', 'audit_log', 'notifications', 'sessions', 'users',
-  ]) {
-    db.exec(`DELETE FROM ${t}`);
+await db.transaction(async (tx) => {
+  for (const t of TABLE_ORDER) {
+    await tx.exec(`DELETE FROM ${t}`);
   }
 
-  const insControl = db.prepare('INSERT INTO controls (id, name, domain, status, owner, review_due) VALUES (?, ?, ?, ?, ?, ?)');
+  const insControl = tx.prepare('INSERT INTO controls (id, name, domain, status, owner, review_due, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
   for (const [id, name, status, owner] of CONTROLS) {
-    insControl.run(id, name, domainOf(id), status, owner, REVIEW_DUE[id] ?? null);
+    await insControl.run(id, name, domainOf(id), status, owner, REVIEW_DUE[id] ?? null, now());
   }
 
-  const insRisk = db.prepare('INSERT INTO risks (id, name, asset, probability, impact, score, level, owner, treatment) VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?)');
+  const insRisk = tx.prepare('INSERT INTO risks (id, name, asset, probability, impact, score, level, owner, treatment, created_at, updated_at) VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?)');
   for (const [id, name, asset, score, level, owner, treatment] of RISKS) {
-    insRisk.run(id, name, asset, score, level, owner, treatment);
+    await insRisk.run(id, name, asset, score, level, owner, treatment, now(), now());
   }
 
-  const insPolicy = db.prepare('INSERT INTO policies (name, category, version, owner, status, updated_at) VALUES (?, ?, ?, ?, ?, ?)');
+  const insPolicy = tx.prepare('INSERT INTO policies (name, category, version, owner, status, updated_at) VALUES (?, ?, ?, ?, ?, ?)');
   for (const [name, category, version, updated, owner, status] of POLICIES) {
-    insPolicy.run(name, category, version, owner, status, czToIso(updated));
+    await insPolicy.run(name, category, version, owner, status, czToIso(updated));
   }
 
-  const insFinding = db.prepare('INSERT INTO audit_findings (id, finding, type, status, due, owner) VALUES (?, ?, ?, ?, ?, ?)');
+  const insFinding = tx.prepare('INSERT INTO audit_findings (id, finding, type, status, due, owner, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
   for (const [id, finding, type, status, due, owner] of FINDINGS) {
-    insFinding.run(id, finding, type, status, czToIso(due), owner);
+    await insFinding.run(id, finding, type, status, czToIso(due), owner, now(), now());
   }
 
-  const insChange = db.prepare(`INSERT INTO changes
-    (id, title, description, type, risk_level, status, owner, planned_date, implemented_date, control_id, risk_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-  for (const [id, title, description, type, riskLevel, status, owner, planned, implemented, controlId, riskId] of CHANGES) {
-    insChange.run(id, title, description, type, riskLevel, status, owner, czToIsoOrNull(planned), czToIsoOrNull(implemented), controlId, riskId);
-  }
-
-  const insIncident = db.prepare(`INSERT INTO incidents
-    (id, title, description, category, priority, status, reported_by, owner, occurred_at, resolved_at, resolution, control_id, risk_id)
+  const insChange = tx.prepare(`INSERT INTO changes
+    (id, title, description, type, risk_level, status, owner, planned_date, implemented_date, control_id, risk_id, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+  for (const [id, title, description, type, riskLevel, status, owner, planned, implemented, controlId, riskId] of CHANGES) {
+    await insChange.run(id, title, description, type, riskLevel, status, owner, czToIsoOrNull(planned), czToIsoOrNull(implemented), controlId, riskId, now(), now());
+  }
+
+  const insIncident = tx.prepare(`INSERT INTO incidents
+    (id, title, description, category, priority, status, reported_by, owner, occurred_at, resolved_at, resolution, control_id, risk_id, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
   for (const [id, title, description, category, priority, status, reportedBy, owner, occurred, resolved, resolution, controlId, riskId] of INCIDENTS) {
-    insIncident.run(id, title, description, category, priority, status, reportedBy, owner, czToIsoOrNull(occurred), czToIsoOrNull(resolved), resolution, controlId, riskId);
+    await insIncident.run(id, title, description, category, priority, status, reportedBy, owner, czToIsoOrNull(occurred), czToIsoOrNull(resolved), resolution, controlId, riskId, now(), now());
   }
 
-  const insTraining = db.prepare('INSERT INTO trainings (name, audience, due, pct, content, target_roles) VALUES (?, ?, ?, ?, ?, ?)');
+  const insTraining = tx.prepare('INSERT INTO trainings (name, audience, due, pct, content, target_roles) VALUES (?, ?, ?, ?, ?, ?)');
   for (const [name, audience, due, pct, content, targetRoles] of TRAININGS) {
-    insTraining.run(name, audience, czToIso(due), pct, content, targetRoles);
+    await insTraining.run(name, audience, czToIso(due), pct, content, targetRoles);
   }
 
-  const insFaq = db.prepare('INSERT INTO faqs (question, answer, position) VALUES (?, ?, ?)');
-  FAQS.forEach(([q, a], i) => insFaq.run(q, a, i));
+  const insFaq = tx.prepare('INSERT INTO faqs (question, answer, position) VALUES (?, ?, ?)');
+  for (const [i, [q, a]] of FAQS.entries()) await insFaq.run(q, a, i);
 
-  const insDeadline = db.prepare('INSERT INTO deadlines (title, owner, due, severity) VALUES (?, ?, ?, ?)');
+  const insDeadline = tx.prepare('INSERT INTO deadlines (title, owner, due, severity) VALUES (?, ?, ?, ?)');
   for (const [title, owner, due, severity] of DEADLINES) {
-    insDeadline.run(title, owner, czToIso(due), severity);
+    await insDeadline.run(title, owner, czToIso(due), severity);
   }
 
-  const insSetting = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)');
-  for (const [key, value] of SETTINGS) insSetting.run(key, value);
+  const insSetting = tx.prepare('INSERT INTO settings (key, value) VALUES (?, ?)');
+  for (const [key, value] of SETTINGS) await insSetting.run(key, value);
 
-  const insUser = db.prepare('INSERT INTO users (username, name, title, email, role, password_hash) VALUES (?, ?, ?, ?, ?, ?)');
+  const insUser = tx.prepare('INSERT INTO users (username, name, title, email, role, password_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
   for (const [username, name, title, email, role, password] of USERS) {
-    insUser.run(username, name, title, email, role, hashPassword(password));
+    await insUser.run(username, name, title, email, role, hashPassword(password), now());
   }
+});
 
-  db.exec('COMMIT');
-} catch (err) {
-  db.exec('ROLLBACK');
-  throw err;
-}
-
-const count = (t) => db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get().n;
-console.log(`Databáze naplněna: ${DB_PATH}`);
+const count = async (t) => (await db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get()).n;
+console.log(`Databáze naplněna: ${process.env.DATABASE_URL ? new URL(process.env.DATABASE_URL).pathname.slice(1) : '(DATABASE_URL)'}`);
 for (const t of ['controls', 'risks', 'policies', 'audit_findings', 'changes', 'incidents', 'trainings', 'faqs', 'deadlines', 'settings', 'users']) {
-  console.log(`  ${t}: ${count(t)}`);
+  console.log(`  ${t}: ${await count(t)}`);
 }
 console.log('\nVývojové účty (změňte v produkci!):');
 for (const [username, , , , role, password] of USERS) {
   console.log(`  ${username} / ${password}  (${role})`);
 }
+await db.close();
