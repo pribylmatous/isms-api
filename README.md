@@ -61,9 +61,10 @@ a jednoduchého klienta, který si mezi requesty drží session cookie jako proh
 | `risks` | Registr rizik | `probability`/`impact` (1–4) → `score`, `level`; u seedovaných záznamů NULL (návrh obsahoval jen skóre) |
 | `policies` | Řízená dokumentace | verze, stav Návrh → K revizi → Schváleno; `file_*` sloupce viz níže |
 | `audit_findings` | Zjištění z auditů | stav Nové → V řešení → Uzavřeno / Po termínu |
-| `changes` | Řízení změn (ITIL, A.8.32) | typ, riziko změny, volitelná vazba na opatření/riziko |
-| `incidents` | Řízení incidentů bezpečnosti informací (ITIL, A.5.24–A.5.30) | kategorie, priorita, volitelná vazba na opatření/riziko; `assigned_to_user_id` (FK `users`) — viz „Workflow incidentu" níže |
-| `incident_activity` | Časová osa jednoho incidentu | přechody stavu + komentáře v jednom feedu, viz „Workflow incidentu" níže |
+| `changes` | Řízení změn (ITIL, A.8.32) | typ, riziko změny, volitelná vazba na opatření/riziko; `assigned_to_user_id` (FK `users`) — viz „Workflow incidentu/změny" níže |
+| `change_activity` | Časová osa jedné změny | přechody stavu + komentáře v jednom feedu, stejný princip jako `incident_activity` |
+| `incidents` | Řízení incidentů bezpečnosti informací (ITIL, A.5.24–A.5.30) | kategorie, priorita, volitelná vazba na opatření/riziko; `assigned_to_user_id` (FK `users`) — viz „Workflow incidentu/změny" níže |
+| `incident_activity` | Časová osa jednoho incidentu | přechody stavu + komentáře v jednom feedu, viz „Workflow incidentu/změny" níže |
 | `audit_log` | Auditní stopa (kdo/co/kdy) | viz sekce „Auditní stopa" níže |
 | `trainings` | Školení | `content` (JSON kvíz) u interaktivních školení; `target_roles` (JSON LOV rolí) určuje cílovou skupinu |
 | `training_completions` | Výsledky absolvování kvízu | jeden aktuální pokus na uživatele a školení |
@@ -159,10 +160,21 @@ DELETE /api/findings/:id
 GET    /api/findings/owners          číselník vlastníků (LOV, viz níže)
 
 GET    /api/changes
+GET    /api/changes/:id
 POST   /api/changes                  { title, type, risk_level, owner, planned_date?, control_id?, risk_id? }
-PUT    /api/changes/:id
+PUT    /api/changes/:id              popisná pole — status jde jen přes workflow akce níže
 DELETE /api/changes/:id
 GET    /api/changes/owners           číselník vlastníků (LOV, viz níže)
+GET    /api/changes/:id/activity     časová osa (přechody stavu + komentáře)
+POST   /api/changes/:id/comments     { text } → přidá poznámku do časové osy, beze změny stavu
+POST   /api/changes/:id/assign       { user_id } → nastaví realizátora, stav nemění
+POST   /api/changes/:id/submit       Návrh → Ke schválení
+POST   /api/changes/:id/approve      Ke schválení → Schváleno
+POST   /api/changes/:id/reject       { reason } → Ke schválení → Zamítnuto
+POST   /api/changes/:id/schedule     { planned_date } → Schváleno → Naplánováno
+POST   /api/changes/:id/implement    Naplánováno → Realizováno (nastaví implemented_date)
+POST   /api/changes/:id/close        Realizováno → Uzavřeno
+POST   /api/changes/:id/reopen       { reason } → (Zamítnuto|Uzavřeno) → Návrh, vyčistí planned_date/implemented_date
 
 GET    /api/incidents
 GET    /api/incidents/:id
@@ -228,27 +240,38 @@ NULL` — smazání navázaného opatření/rizika vazbu jen zruší, záznam zm
 incidentu zůstane). Odpovídají opatřením přílohy A **A.8.32** (Řízení změn)
 a **A.5.24–A.5.30** (Řízení incidentů bezpečnosti informací), která už
 katalog obsahuje. Notifikace a auditní stopa fungují stejně jako u ostatních
-registrů (`change.created`/`change.status`/`change.deleted`,
+registrů (`change.created`/`change.status`/`change.assigned`/`change.deleted`,
 `incident.created`/`incident.status`/`incident.assigned`/`incident.deleted`).
 
-### Workflow incidentu (ticketDetail)
+### Workflow incidentu/změny (ticketDetail)
 
-Na rozdíl od `changes` má `incidents` navíc plnohodnotný stavový workflow —
-`status` se mění výhradně přes akce v `src/routes.js` (`INCIDENT_TRANSITIONS`),
-ne přes generický `PUT` (ten teď mění jen popisná pole): `Nové → Přiřazeno →
-V řešení ⇄ Pozastaveno → (Eskalováno →) Vyřešeno → Uzavřeno`, s možností
-`reopen` z `Vyřešeno`/`Uzavřeno` zpět na `V řešení`. Každá akce ověří, že
+Obě tabulky mají plnohodnotný stavový workflow — `status` se mění výhradně
+přes akce v `src/routes.js` (`INCIDENT_TRANSITIONS`/`CHANGE_TRANSITIONS`), ne
+přes generický `PUT` (ten teď mění jen popisná pole). Každá akce ověří, že
 přechod je z aktuálního stavu platný (409 jinak), a zapíše řádek do
-`incident_activity` — časové osy konkrétního incidentu, co kombinuje systémové
-přechody (`type: 'status_change'`/`'assignment'`) i ruční poznámky
-(`type: 'comment'`, `POST .../comments`) v jednom feedu řazeném podle `at`
-(`GET .../activity`). Řešitel (`assigned_to_user_id`, FK na `users`) je
-nezávislý na `owner` (LOV odpovědná osoba/útvar, reporting pohled, stejný
-princip jako u ostatních registrů) — přiřazení akcí `assign` jde provést
-kdykoli mimo `Vyřešeno`/`Uzavřeno`, i opakovaně (přeřazení jinému řešiteli
-během `V řešení` stav nemění). Pro výběr řešitele existuje odlehčený
-`GET /api/users/assignable` (jen `{ id, name }`, dostupný komukoli
-přihlášenému) — na rozdíl od `GET /api/users` (jen manažer, plná data).
+`incident_activity`/`change_activity` — časové osy konkrétního záznamu, co
+kombinuje systémové přechody (`type: 'status_change'`/`'assignment'`) i ruční
+poznámky (`type: 'comment'`, `POST .../comments`) v jednom feedu řazeném podle
+`at` (`GET .../activity`). Řešitel/realizátor (`assigned_to_user_id`, FK na
+`users`) je nezávislý na `owner` (LOV odpovědná osoba/útvar, reporting pohled,
+stejný princip jako u ostatních registrů) — přiřazení akcí `assign` jde
+provést i opakovaně (přeřazení jinému řešiteli/realizátorovi stav sám o sobě
+nemění). Pro výběr existuje odlehčený `GET /api/users/assignable`
+(jen `{ id, name }`, dostupný komukoli přihlášenému) — na rozdíl od
+`GET /api/users` (jen manažer, plná data).
+
+**Incident:** `Nové → Přiřazeno → V řešení ⇄ Pozastaveno → (Eskalováno →)
+Vyřešeno → Uzavřeno`, s `reopen` z `Vyřešeno`/`Uzavřeno` zpět na `V řešení`.
+Assign je blokovaný ve `Vyřešeno`/`Uzavřeno`.
+
+**Změna:** `Návrh → Ke schválení → Schváleno → Naplánováno → Realizováno →
+Uzavřeno`, s odbočkou `Ke schválení → Zamítnuto` a `reopen` z
+`Zamítnuto`/`Uzavřeno` zpět na `Návrh` (vyčistí `planned_date`/
+`implemented_date`). Na rozdíl od incidentů `assign` stav nikdy neposouvá
+(u incidentů první přiřazení posune `Nové` → `Přiřazeno`) — u změny je
+přiřazení realizátora čistě informační, dokud ji někdo neodešle ke schválení.
+Assign je blokovaný v `Uzavřeno`/`Zamítnuto`. `schedule` vyžaduje
+`planned_date`, `implement` automaticky nastaví `implemented_date` na dnešek.
 
 ## Interaktivní školení
 

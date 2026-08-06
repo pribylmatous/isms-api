@@ -330,14 +330,77 @@ export function registerRoutes(app, db, requireRole, notifier, audit) {
   });
 
   // ---------- Řízení změn (ITIL, viz opatření A.8.32) ----------
+  //
+  // Stejný princip jako incidenty výše: status se mění jen přes validované
+  // akce (submit/approve/reject/schedule/implement/close/reopen), ne přes
+  // obecný PUT. change_activity je časová osa (přechody + komentáře).
+
+  const CHANGE_TRANSITIONS = {
+    submit:    { from: ['Návrh'], to: 'Ke schválení' },
+    approve:   { from: ['Ke schválení'], to: 'Schváleno' },
+    reject:    { from: ['Ke schválení'], to: 'Zamítnuto' },
+    schedule:  { from: ['Schváleno'], to: 'Naplánováno' },
+    implement: { from: ['Naplánováno'], to: 'Realizováno' },
+    close:     { from: ['Realizováno'], to: 'Uzavřeno' },
+    reopen:    { from: ['Zamítnuto', 'Uzavřeno'], to: 'Návrh' },
+  };
+
+  const loadChange = async (id) => {
+    const change = await db.prepare(
+      `SELECT c.*, u.name AS assigned_to_name FROM changes c
+       LEFT JOIN users u ON u.id = c.assigned_to_user_id WHERE c.id = ?`,
+    ).get(id);
+    if (!change) throw httpError(404, 'Změna nenalezena');
+    return change;
+  };
+
+  const logChangeActivity = (req, changeId, { type, fromStatus = null, toStatus = null, note = null }) =>
+    db.prepare(`INSERT INTO change_activity (change_id, type, user_id, user_name, from_status, to_status, note, at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(changeId, type, req.user.id, req.user.name, fromStatus, toStatus, note, new Date().toISOString());
+
+  const applyChangeTransition = async (req, res, key, { extra = {}, note = null } = {}) => {
+    const def = CHANGE_TRANSITIONS[key];
+    const existing = await loadChange(req.params.id);
+    if (!def.from.includes(existing.status)) {
+      throw httpError(409, `Nelze provést akci z aktuálního stavu („${existing.status}")`);
+    }
+    const fields = { status: def.to, ...extra };
+    const setClause = Object.keys(fields).map((k) => `${k} = ?`).join(', ');
+    await db.prepare(`UPDATE changes SET ${setClause}, updated_at = ? WHERE id = ?`)
+      .run(...Object.values(fields), new Date().toISOString(), req.params.id);
+    await logChangeActivity(req, existing.id, { type: 'status_change', fromStatus: existing.status, toStatus: def.to, note });
+    const updated = await loadChange(existing.id);
+    await notifier.notify('change.status', `Změna ${updated.id}: ${updated.status}`, [
+      `Stav: ${existing.status} → ${updated.status}`,
+      ...(note ? [`Poznámka: ${note}`] : []),
+      `Vlastník: ${updated.owner}`,
+      by(req),
+    ]);
+    await audit.record(req, { entity: 'change', entityId: updated.id, action: 'update', before: existing, after: updated, label: updated.title });
+    res.json(updated);
+  };
 
   app.get('/api/changes', async (req, res) => {
-    res.json(await db.prepare('SELECT * FROM changes ORDER BY id DESC').all());
+    res.json(await db.prepare(
+      `SELECT c.*, u.name AS assigned_to_name FROM changes c
+       LEFT JOIN users u ON u.id = c.assigned_to_user_id ORDER BY c.id DESC`,
+    ).all());
   });
 
-  // Předdefinovaný číselník vlastníků (LOV) pro formulář
+  // Předdefinovaný číselník vlastníků (LOV) pro formulář — musí být registrováno
+  // před GET /api/changes/:id, jinak by ho ten (jako '/changes/owners') odchytil.
   app.get('/api/changes/owners', (req, res) => {
     res.json(OWNERS);
+  });
+
+  app.get('/api/changes/:id', async (req, res) => {
+    res.json(await loadChange(req.params.id));
+  });
+
+  app.get('/api/changes/:id/activity', async (req, res) => {
+    await loadChange(req.params.id);
+    res.json(await db.prepare('SELECT * FROM change_activity WHERE change_id = ? ORDER BY at, id').all(req.params.id));
   });
 
   app.post('/api/changes', canWrite, async (req, res) => {
@@ -362,36 +425,98 @@ export function registerRoutes(app, db, requireRole, notifier, audit) {
   });
 
   app.put('/api/changes/:id', canWrite, async (req, res) => {
-    const existing = await db.prepare('SELECT * FROM changes WHERE id = ?').get(req.params.id);
-    if (!existing) throw httpError(404, 'Změna nenalezena');
+    const existing = await loadChange(req.params.id);
     const c = {
       ...existing,
-      ...pick(req.body, ['title', 'description', 'type', 'risk_level', 'status', 'owner', 'planned_date', 'implemented_date', 'control_id', 'risk_id']),
+      ...pick(req.body, ['title', 'description', 'type', 'risk_level', 'owner', 'control_id', 'risk_id']),
     };
     if ('control_id' in req.body) c.control_id = await assertRef(db, 'controls', req.body.control_id, 'opatření');
     if ('risk_id' in req.body) c.risk_id = await assertRef(db, 'risks', req.body.risk_id, 'riziko');
-    await db.prepare(`UPDATE changes SET title = ?, description = ?, type = ?, risk_level = ?, status = ?, owner = ?,
-      planned_date = ?, implemented_date = ?, control_id = ?, risk_id = ?, updated_at = ? WHERE id = ?`)
-      .run(c.title, c.description, c.type, c.risk_level, c.status, c.owner, c.planned_date, c.implemented_date, c.control_id, c.risk_id, new Date().toISOString(), req.params.id);
-    if (c.status !== existing.status) {
-      await notifier.notify('change.status', `Změna ${c.id}: ${c.status}`, [
-        `Stav: ${existing.status} → ${c.status}`,
-        `Vlastník: ${c.owner}`,
-        by(req),
-      ]);
-    }
-    const updated = await db.prepare('SELECT * FROM changes WHERE id = ?').get(req.params.id);
+    await db.prepare(`UPDATE changes SET title = ?, description = ?, type = ?, risk_level = ?, owner = ?,
+      control_id = ?, risk_id = ?, updated_at = ? WHERE id = ?`)
+      .run(c.title, c.description, c.type, c.risk_level, c.owner, c.control_id, c.risk_id, new Date().toISOString(), req.params.id);
+    const updated = await loadChange(req.params.id);
     await audit.record(req, { entity: 'change', entityId: updated.id, action: 'update', before: existing, after: updated, label: updated.title });
     res.json(updated);
   });
 
   app.delete('/api/changes/:id', canDelete, async (req, res) => {
-    const existing = await db.prepare('SELECT * FROM changes WHERE id = ?').get(req.params.id);
-    if (!existing) throw httpError(404, 'Změna nenalezena');
+    const existing = await loadChange(req.params.id);
     await db.prepare('DELETE FROM changes WHERE id = ?').run(req.params.id);
     await notifier.notify('change.deleted', `Změna ${existing.id} smazána: ${existing.title}`, [by(req)]);
     await audit.record(req, { entity: 'change', entityId: existing.id, action: 'delete', before: existing, label: existing.title });
     res.status(204).end();
+  });
+
+  // ---------- Workflow změny: přiřazení realizátora + přechody stavu ----------
+
+  app.post('/api/changes/:id/comments', canWrite, async (req, res) => {
+    need(req.body, 'text');
+    const change = await loadChange(req.params.id);
+    await logChangeActivity(req, change.id, { type: 'comment', note: String(req.body.text).trim() });
+    res.status(201).json(
+      await db.prepare('SELECT * FROM change_activity WHERE change_id = ? ORDER BY at DESC, id DESC LIMIT 1').get(change.id),
+    );
+  });
+
+  app.post('/api/changes/:id/assign', canWrite, async (req, res) => {
+    need(req.body, 'user_id');
+    const existing = await loadChange(req.params.id);
+    if (['Uzavřeno', 'Zamítnuto'].includes(existing.status)) {
+      throw httpError(409, `Nelze přiřadit realizátora ve stavu „${existing.status}"`);
+    }
+    const assignee = await db.prepare('SELECT * FROM users WHERE id = ? AND active = 1').get(req.body.user_id);
+    if (!assignee) throw httpError(400, 'Neplatný nebo neaktivní uživatel');
+    await db.prepare('UPDATE changes SET assigned_to_user_id = ?, updated_at = ? WHERE id = ?')
+      .run(assignee.id, new Date().toISOString(), existing.id);
+    await logChangeActivity(req, existing.id, { type: 'assignment', note: `Přiřazeno: ${assignee.name}` });
+    const updated = await loadChange(existing.id);
+    await notifier.notify('change.assigned', `Změna ${updated.id}: přiřazen realizátor`, [
+      `Realizátor: ${assignee.name}`,
+      by(req),
+    ]);
+    await audit.record(req, { entity: 'change', entityId: updated.id, action: 'update', before: existing, after: updated, label: updated.title });
+    res.json(updated);
+  });
+
+  app.post('/api/changes/:id/submit', canWrite, async (req, res) => {
+    await applyChangeTransition(req, res, 'submit');
+  });
+
+  app.post('/api/changes/:id/approve', canWrite, async (req, res) => {
+    await applyChangeTransition(req, res, 'approve');
+  });
+
+  app.post('/api/changes/:id/reject', canWrite, async (req, res) => {
+    need(req.body, 'reason');
+    await applyChangeTransition(req, res, 'reject', { note: String(req.body.reason).trim() });
+  });
+
+  app.post('/api/changes/:id/schedule', canWrite, async (req, res) => {
+    need(req.body, 'planned_date');
+    await applyChangeTransition(req, res, 'schedule', {
+      extra: { planned_date: req.body.planned_date },
+      note: `Plánovaný termín: ${req.body.planned_date}`,
+    });
+  });
+
+  app.post('/api/changes/:id/implement', canWrite, async (req, res) => {
+    await applyChangeTransition(req, res, 'implement', {
+      extra: { implemented_date: new Date().toISOString().slice(0, 10) },
+    });
+  });
+
+  app.post('/api/changes/:id/close', canWrite, async (req, res) => {
+    await applyChangeTransition(req, res, 'close');
+  });
+
+  app.post('/api/changes/:id/reopen', canWrite, async (req, res) => {
+    need(req.body, 'reason');
+    const reason = String(req.body.reason).trim();
+    await applyChangeTransition(req, res, 'reopen', {
+      extra: { planned_date: null, implemented_date: null },
+      note: reason,
+    });
   });
 
   // ---------- Řízení incidentů bezpečnosti informací (ITIL, viz opatření A.5.24–A.5.30) ----------
@@ -413,8 +538,13 @@ export function registerRoutes(app, db, requireRole, notifier, audit) {
     reopen:   { from: ['Vyřešeno', 'Uzavřeno'], to: 'V řešení' },
   };
 
+  // assigned_to_name je jen pohodlnostní join pro frontend (ticketDetail) —
+  // assigned_to_user_id zůstává zdrojem pravdy, jméno se nikam neukládá.
   const loadIncident = async (id) => {
-    const incident = await db.prepare('SELECT * FROM incidents WHERE id = ?').get(id);
+    const incident = await db.prepare(
+      `SELECT i.*, u.name AS assigned_to_name FROM incidents i
+       LEFT JOIN users u ON u.id = i.assigned_to_user_id WHERE i.id = ?`,
+    ).get(id);
     if (!incident) throw httpError(404, 'Incident nenalezen');
     return incident;
   };
@@ -448,7 +578,10 @@ export function registerRoutes(app, db, requireRole, notifier, audit) {
   };
 
   app.get('/api/incidents', async (req, res) => {
-    res.json(await db.prepare('SELECT * FROM incidents ORDER BY id DESC').all());
+    res.json(await db.prepare(
+      `SELECT i.*, u.name AS assigned_to_name FROM incidents i
+       LEFT JOIN users u ON u.id = i.assigned_to_user_id ORDER BY i.id DESC`,
+    ).all());
   });
 
   // Předdefinovaný číselník vlastníků (LOV) pro formulář — musí být registrováno
