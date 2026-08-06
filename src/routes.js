@@ -1072,6 +1072,17 @@ export function registerRoutes(app, db, requireRole, notifier, audit) {
       });
     }
 
+    const newIncidents = (await db.prepare("SELECT COUNT(*) AS n FROM incidents WHERE status = 'Nové'").get()).n;
+    const criticalNewIncidents = (await db.prepare(
+      "SELECT COUNT(*) AS n FROM incidents WHERE status = 'Nové' AND priority = 'Kritická'",
+    ).get()).n;
+    if (newIncidents > 0) {
+      alerts.push({
+        severity: criticalNewIncidents > 0 ? 'danger' : 'warn',
+        text: `${newIncidents} ${newIncidents === 1 ? 'nový incident čeká' : 'nových incidentů čeká'} na přiřazení řešitele.`,
+      });
+    }
+
     const setting = async (key) => (await db.prepare('SELECT value FROM settings WHERE key = ?').get(key))?.value ?? null;
 
     res.json({
