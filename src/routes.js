@@ -1058,17 +1058,22 @@ export function registerRoutes(app, db, requireRole, notifier, audit) {
       'SELECT domain, COUNT(*) AS n FROM controls WHERE review_due IS NOT NULL AND review_due <= ? GROUP BY domain',
     ).all(in30days);
 
+    // section = cílová sekce portálu (klíč SECTIONS v App.jsx) — frontend z ní
+    // udělá odkaz "#/<section>", aby šlo z upozornění proklikout rovnou na
+    // konkrétní případy, ne jen si přečíst počet.
     const alerts = [];
     for (const r of reviewSoon) {
       alerts.push({
         severity: 'warn',
         text: `${r.n} opatření přílohy A vyžadují přezkoumání do 30 dnů – doména ${r.domain} bezpečnost.`,
+        section: 'controls',
       });
     }
     if (overdueFindings > 0) {
       alerts.push({
         severity: 'danger',
         text: `${overdueFindings} nápravná opatření z interního auditu jsou po termínu plnění – vyžadují eskalaci vedení.`,
+        section: 'audits',
       });
     }
 
@@ -1080,6 +1085,7 @@ export function registerRoutes(app, db, requireRole, notifier, audit) {
       alerts.push({
         severity: criticalNewIncidents > 0 ? 'danger' : 'warn',
         text: `${newIncidents} ${newIncidents === 1 ? 'nový incident čeká' : 'nových incidentů čeká'} na přiřazení řešitele.`,
+        section: 'incidents',
       });
     }
 
