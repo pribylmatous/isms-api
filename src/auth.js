@@ -4,6 +4,7 @@
 
 import crypto from 'node:crypto';
 import { isSsoEnabled, roleFromClaims, buildAuthorizationUrl, handleCallback } from './sso.js';
+import { loginRateLimited, registerLoginFailure, registerLoginSuccess } from './rateLimit.js';
 
 const COOKIE = 'isms_session';
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000; // 8 hodin
@@ -64,10 +65,20 @@ export function createAuth(db) {
       if (!username || !password) {
         return res.status(400).json({ error: 'Zadejte uživatelské jméno a heslo' });
       }
-      const user = await db.prepare('SELECT * FROM users WHERE username = ? AND active = 1').get(String(username).trim().toLowerCase());
+      const normalizedUsername = String(username).trim().toLowerCase();
+
+      const retryAfter = loginRateLimited(req.ip, normalizedUsername);
+      if (retryAfter > 0) {
+        res.set('Retry-After', String(retryAfter));
+        return res.status(429).json({ error: 'Příliš mnoho neúspěšných pokusů o přihlášení. Zkuste to prosím později.' });
+      }
+
+      const user = await db.prepare('SELECT * FROM users WHERE username = ? AND active = 1').get(normalizedUsername);
       if (!user || !verifyPassword(String(password), user.password_hash)) {
+        registerLoginFailure(req.ip, normalizedUsername);
         return res.status(401).json({ error: 'Neplatné uživatelské jméno nebo heslo' });
       }
+      registerLoginSuccess(req.ip, normalizedUsername);
       const token = await createSession(user.id);
       res.cookie(COOKIE, token, { ...cookieOptions, maxAge: SESSION_TTL_MS });
       res.json(publicUser(user));

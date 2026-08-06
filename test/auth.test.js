@@ -80,3 +80,44 @@ describe('přihlášení a role', () => {
     assert.equal(res.status, 401);
   });
 });
+
+describe('rate limiting přihlášení', () => {
+  let ctx;
+
+  before(async () => {
+    ctx = await startTestServer();
+    await createUser(ctx.db, { username: 'ratelimit', name: 'Rate Limit', role: 'reader', password: 'Heslo.123' });
+  });
+
+  after(() => ctx.close());
+
+  test('po 5 neúspěšných pokusech na stejný účet vrátí 429 s Retry-After', async () => {
+    for (let i = 0; i < 5; i++) {
+      const res = await ctx.client.post('/api/auth/login', { username: 'ratelimit', password: 'spatne' });
+      assert.equal(res.status, 401, `pokus ${i + 1} by měl vrátit 401`);
+    }
+    const blocked = await ctx.client.post('/api/auth/login', { username: 'ratelimit', password: 'spatne' });
+    assert.equal(blocked.status, 429);
+    assert.ok(blocked.headers.get('retry-after'), 'měl by být nastavený Retry-After');
+
+    // I se správným heslem zůstává zablokovaný, dokud limit nevyprší
+    const correctButBlocked = await ctx.client.post('/api/auth/login', { username: 'ratelimit', password: 'Heslo.123' });
+    assert.equal(correctButBlocked.status, 429);
+  });
+
+  test('úspěšné přihlášení vyčistí počítadlo neúspěšných pokusů', async () => {
+    await createUser(ctx.db, { username: 'ratelimit2', name: 'Rate Limit 2', role: 'reader', password: 'Heslo.123' });
+    for (let i = 0; i < 3; i++) {
+      const res = await ctx.client.post('/api/auth/login', { username: 'ratelimit2', password: 'spatne' });
+      assert.equal(res.status, 401);
+    }
+    const ok = await ctx.client.login('ratelimit2', 'Heslo.123');
+    assert.equal(ok.username, 'ratelimit2');
+
+    // Počítadlo se resetovalo — další 4 neúspěšné pokusy (< limit 5) ještě neblokují
+    for (let i = 0; i < 4; i++) {
+      const res = await ctx.client.post('/api/auth/login', { username: 'ratelimit2', password: 'spatne' });
+      assert.equal(res.status, 401, `pokus ${i + 1} po resetu by neměl být blokovaný`);
+    }
+  });
+});
