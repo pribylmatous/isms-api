@@ -31,6 +31,14 @@ const parseCookies = (header = '') =>
 
 const publicUser = (u) => ({ id: u.id, username: u.username, name: u.name, title: u.title, role: u.role });
 
+// DISABLE_LOCAL_LOGIN=1 vypne lokální přihlášení (a tím i seedované dev účty)
+// jednou, co je SSO ověřeně funkční. Podmínka na isSsoEnabled() je pojistka
+// proti zamknutí administrace překlepem v konfiguraci — bez SSO se příznak
+// ignoruje, aby portál nikdy neskončil bez jediné cesty k přihlášení.
+export function isLocalLoginEnabled() {
+  return !(process.env.DISABLE_LOCAL_LOGIN === '1' && isSsoEnabled());
+}
+
 export function createAuth(db) {
   // COOKIE_SECURE=1 v produkci (portál běží pod HTTPS) — na http://localhost by
   // prohlížeč cookie se secure:true vůbec neuložil. Čte se až tady (ne na
@@ -61,6 +69,9 @@ export function createAuth(db) {
 
   function registerAuthRoutes(app) {
     app.post('/api/auth/login', async (req, res) => {
+      if (!isLocalLoginEnabled()) {
+        return res.status(404).json({ error: 'Lokální přihlášení je vypnuté' });
+      }
       const { username, password } = req.body ?? {};
       if (!username || !password) {
         return res.status(400).json({ error: 'Zadejte uživatelské jméno a heslo' });
@@ -98,7 +109,7 @@ export function createAuth(db) {
     });
 
     app.get('/api/auth/config', (req, res) => {
-      res.json({ ssoEnabled: isSsoEnabled() });
+      res.json({ ssoEnabled: isSsoEnabled(), localLoginEnabled: isLocalLoginEnabled() });
     });
   }
 

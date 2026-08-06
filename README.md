@@ -93,6 +93,14 @@ Vývojové účty ze seedu (**v produkci změnit / nahradit SSO Entra ID**):
 Při přechodu na SSO se vymění pouze login endpoint v `src/auth.js` —
 guard, `requireRole` i tabulka `users` (role mapované z AD skupin) zůstávají.
 
+Až je SSO v produkci ověřené, `DISABLE_LOCAL_LOGIN=1` (v `.env`) vypne lokální
+přihlášení úplně (`POST /api/auth/login` vrací 404, `GET /api/auth/config`
+hlásí `localLoginEnabled: false`, frontend skryje formulář) — tím padnou
+i seedované dev účty jako cesta dovnitř. Příznak se **ignoruje**, dokud
+nejsou nastavené všechny `ENTRA_*` proměnné (`isLocalLoginEnabled()` v
+`src/auth.js`), aby překlep v konfiguraci nezamkl administraci úplně bez
+cesty k přihlášení.
+
 ### Správa uživatelů (jen `manager`)
 
 ```
@@ -307,6 +315,8 @@ přejmenování rizika beze změny stavu). Vidí ji jen `manager`, na
 ## Další kroky
 
 Frontend napojen, SSO (Entra ID, viz `src/sso.js`) i přechod na PostgreSQL hotové.
-Zbývá z pre-prod seznamu: rate limiting na `/api/auth/login`, zrušení/rotace
-lokálních dev účtů, reálné SMTP, produkční build + hosting frontendu, TLS,
+Hotovo i rate limiting na `/api/auth/login` (`src/rateLimit.js`) a vypnutí
+lokálních dev účtů přes `DISABLE_LOCAL_LOGIN=1` (viz „Přihlašování a role"
+výše) — zbývá to v produkci skutečně nastavit, až bude SSO ověřené.
+Zbývá z pre-prod seznamu: reálné SMTP, produkční build + hosting frontendu, TLS,
 proces supervisor místo `node --watch`, monitoring.
