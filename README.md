@@ -62,7 +62,8 @@ a jednoduchého klienta, který si mezi requesty drží session cookie jako proh
 | `policies` | Řízená dokumentace | verze, stav Návrh → K revizi → Schváleno; `file_*` sloupce viz níže |
 | `audit_findings` | Zjištění z auditů | stav Nové → V řešení → Uzavřeno / Po termínu |
 | `changes` | Řízení změn (ITIL, A.8.32) | typ, riziko změny, volitelná vazba na opatření/riziko |
-| `incidents` | Řízení incidentů bezpečnosti informací (ITIL, A.5.24–A.5.30) | kategorie, priorita, volitelná vazba na opatření/riziko |
+| `incidents` | Řízení incidentů bezpečnosti informací (ITIL, A.5.24–A.5.30) | kategorie, priorita, volitelná vazba na opatření/riziko; `assigned_to_user_id` (FK `users`) — viz „Workflow incidentu" níže |
+| `incident_activity` | Časová osa jednoho incidentu | přechody stavu + komentáře v jednom feedu, viz „Workflow incidentu" níže |
 | `audit_log` | Auditní stopa (kdo/co/kdy) | viz sekce „Auditní stopa" níže |
 | `trainings` | Školení | `content` (JSON kvíz) u interaktivních školení; `target_roles` (JSON LOV rolí) určuje cílovou skupinu |
 | `training_completions` | Výsledky absolvování kvízu | jeden aktuální pokus na uživatele a školení |
@@ -164,10 +165,22 @@ DELETE /api/changes/:id
 GET    /api/changes/owners           číselník vlastníků (LOV, viz níže)
 
 GET    /api/incidents
+GET    /api/incidents/:id
 POST   /api/incidents                { title, category, priority, reported_by, owner, occurred_at, control_id?, risk_id? }
-PUT    /api/incidents/:id
+PUT    /api/incidents/:id            popisná pole (název, kategorie, priorita, …) — status jde jen přes workflow akce níže
 DELETE /api/incidents/:id
 GET    /api/incidents/owners         číselník vlastníků (LOV, viz níže)
+GET    /api/incidents/:id/activity   časová osa (přechody stavu + komentáře), viz „Workflow incidentu" níže
+POST   /api/incidents/:id/comments   { text } → přidá poznámku do časové osy, beze změny stavu
+POST   /api/incidents/:id/assign     { user_id } → nastaví řešitele; z „Nové" navíc přejde na „Přiřazeno"
+POST   /api/incidents/:id/start      Přiřazeno → V řešení
+POST   /api/incidents/:id/pause      { reason } → V řešení → Pozastaveno
+POST   /api/incidents/:id/resume     Pozastaveno → V řešení
+POST   /api/incidents/:id/escalate   { note? } → (V řešení|Pozastaveno) → Eskalováno
+POST   /api/incidents/:id/resolve    { resolution } → (V řešení|Eskalováno) → Vyřešeno
+POST   /api/incidents/:id/close      Vyřešeno → Uzavřeno
+POST   /api/incidents/:id/reopen     { reason } → (Vyřešeno|Uzavřeno) → V řešení, vyčistí resolution/resolved_at
+GET    /api/users/assignable         { id, name }[] aktivních uživatelů — pro výběr řešitele (komukoli přihlášenému)
 
 GET    /api/trainings                jen školení pro roli přihlášeného uživatele (manager vidí všechna);
                                       pct živě dopočtené vůči cílové skupině, + myCompletion uživatele
@@ -216,7 +229,26 @@ incidentu zůstane). Odpovídají opatřením přílohy A **A.8.32** (Řízení 
 a **A.5.24–A.5.30** (Řízení incidentů bezpečnosti informací), která už
 katalog obsahuje. Notifikace a auditní stopa fungují stejně jako u ostatních
 registrů (`change.created`/`change.status`/`change.deleted`,
-`incident.created`/`incident.status`/`incident.deleted`).
+`incident.created`/`incident.status`/`incident.assigned`/`incident.deleted`).
+
+### Workflow incidentu (ticketDetail)
+
+Na rozdíl od `changes` má `incidents` navíc plnohodnotný stavový workflow —
+`status` se mění výhradně přes akce v `src/routes.js` (`INCIDENT_TRANSITIONS`),
+ne přes generický `PUT` (ten teď mění jen popisná pole): `Nové → Přiřazeno →
+V řešení ⇄ Pozastaveno → (Eskalováno →) Vyřešeno → Uzavřeno`, s možností
+`reopen` z `Vyřešeno`/`Uzavřeno` zpět na `V řešení`. Každá akce ověří, že
+přechod je z aktuálního stavu platný (409 jinak), a zapíše řádek do
+`incident_activity` — časové osy konkrétního incidentu, co kombinuje systémové
+přechody (`type: 'status_change'`/`'assignment'`) i ruční poznámky
+(`type: 'comment'`, `POST .../comments`) v jednom feedu řazeném podle `at`
+(`GET .../activity`). Řešitel (`assigned_to_user_id`, FK na `users`) je
+nezávislý na `owner` (LOV odpovědná osoba/útvar, reporting pohled, stejný
+princip jako u ostatních registrů) — přiřazení akcí `assign` jde provést
+kdykoli mimo `Vyřešeno`/`Uzavřeno`, i opakovaně (přeřazení jinému řešiteli
+během `V řešení` stav nemění). Pro výběr řešitele existuje odlehčený
+`GET /api/users/assignable` (jen `{ id, name }`, dostupný komukoli
+přihlášenému) — na rozdíl od `GET /api/users` (jen manažer, plná data).
 
 ## Interaktivní školení
 

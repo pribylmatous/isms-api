@@ -395,14 +395,75 @@ export function registerRoutes(app, db, requireRole, notifier, audit) {
   });
 
   // ---------- Řízení incidentů bezpečnosti informací (ITIL, viz opatření A.5.24–A.5.30) ----------
+  //
+  // Stav (status) se od workflow akcí níže (assign/start/pause/resume/escalate/
+  // resolve/close/reopen) mění výhradně přes ně, ne přes obecný PUT — každá akce
+  // validuje, ze kterých stavů je přechod platný (409 jinak), zapisuje řádek do
+  // incident_activity (časová osa v ticketDetail) a posílá stejnou e-mailovou
+  // notifikaci/audit log jako dřív generický PUT. `owner` (LOV, reporting pohled)
+  // a `assigned_to_user_id` (konkrétní řešitel, workflow pohled) jsou nezávislá pole.
+
+  const INCIDENT_TRANSITIONS = {
+    start:    { from: ['Přiřazeno'], to: 'V řešení' },
+    pause:    { from: ['V řešení'], to: 'Pozastaveno' },
+    resume:   { from: ['Pozastaveno'], to: 'V řešení' },
+    escalate: { from: ['V řešení', 'Pozastaveno'], to: 'Eskalováno' },
+    resolve:  { from: ['V řešení', 'Eskalováno'], to: 'Vyřešeno' },
+    close:    { from: ['Vyřešeno'], to: 'Uzavřeno' },
+    reopen:   { from: ['Vyřešeno', 'Uzavřeno'], to: 'V řešení' },
+  };
+
+  const loadIncident = async (id) => {
+    const incident = await db.prepare('SELECT * FROM incidents WHERE id = ?').get(id);
+    if (!incident) throw httpError(404, 'Incident nenalezen');
+    return incident;
+  };
+
+  const logIncidentActivity = (req, incidentId, { type, fromStatus = null, toStatus = null, note = null }) =>
+    db.prepare(`INSERT INTO incident_activity (incident_id, type, user_id, user_name, from_status, to_status, note, at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(incidentId, type, req.user.id, req.user.name, fromStatus, toStatus, note, new Date().toISOString());
+
+  // Validovaný přechod stavu (klíč z INCIDENT_TRANSITIONS) + zápis activity/audit/notifikace.
+  const applyIncidentTransition = async (req, res, key, { extra = {}, note = null } = {}) => {
+    const def = INCIDENT_TRANSITIONS[key];
+    const existing = await loadIncident(req.params.id);
+    if (!def.from.includes(existing.status)) {
+      throw httpError(409, `Nelze provést akci z aktuálního stavu („${existing.status}")`);
+    }
+    const fields = { status: def.to, ...extra };
+    const setClause = Object.keys(fields).map((k) => `${k} = ?`).join(', ');
+    await db.prepare(`UPDATE incidents SET ${setClause}, updated_at = ? WHERE id = ?`)
+      .run(...Object.values(fields), new Date().toISOString(), req.params.id);
+    await logIncidentActivity(req, existing.id, { type: 'status_change', fromStatus: existing.status, toStatus: def.to, note });
+    const updated = await loadIncident(existing.id);
+    await notifier.notify('incident.status', `Incident ${updated.id}: ${updated.status}`, [
+      `Stav: ${existing.status} → ${updated.status}`,
+      ...(note ? [`Poznámka: ${note}`] : []),
+      `Vlastník: ${updated.owner}`,
+      by(req),
+    ]);
+    await audit.record(req, { entity: 'incident', entityId: updated.id, action: 'update', before: existing, after: updated, label: updated.title });
+    res.json(updated);
+  };
 
   app.get('/api/incidents', async (req, res) => {
     res.json(await db.prepare('SELECT * FROM incidents ORDER BY id DESC').all());
   });
 
-  // Předdefinovaný číselník vlastníků (LOV) pro formulář
+  // Předdefinovaný číselník vlastníků (LOV) pro formulář — musí být registrováno
+  // před GET /api/incidents/:id, jinak by ho ten (jako '/incidents/owners') odchytil.
   app.get('/api/incidents/owners', (req, res) => {
     res.json(OWNERS);
+  });
+
+  app.get('/api/incidents/:id', async (req, res) => {
+    res.json(await loadIncident(req.params.id));
+  });
+
+  app.get('/api/incidents/:id/activity', async (req, res) => {
+    await loadIncident(req.params.id);
+    res.json(await db.prepare('SELECT * FROM incident_activity WHERE incident_id = ? ORDER BY at, id').all(req.params.id));
   });
 
   app.post('/api/incidents', canWrite, async (req, res) => {
@@ -427,36 +488,103 @@ export function registerRoutes(app, db, requireRole, notifier, audit) {
   });
 
   app.put('/api/incidents/:id', canWrite, async (req, res) => {
-    const existing = await db.prepare('SELECT * FROM incidents WHERE id = ?').get(req.params.id);
-    if (!existing) throw httpError(404, 'Incident nenalezen');
+    const existing = await loadIncident(req.params.id);
     const i = {
       ...existing,
-      ...pick(req.body, ['title', 'description', 'category', 'priority', 'status', 'reported_by', 'owner', 'occurred_at', 'resolved_at', 'resolution', 'control_id', 'risk_id']),
+      ...pick(req.body, ['title', 'description', 'category', 'priority', 'reported_by', 'owner', 'occurred_at', 'control_id', 'risk_id']),
     };
     if ('control_id' in req.body) i.control_id = await assertRef(db, 'controls', req.body.control_id, 'opatření');
     if ('risk_id' in req.body) i.risk_id = await assertRef(db, 'risks', req.body.risk_id, 'riziko');
-    await db.prepare(`UPDATE incidents SET title = ?, description = ?, category = ?, priority = ?, status = ?, reported_by = ?,
-      owner = ?, occurred_at = ?, resolved_at = ?, resolution = ?, control_id = ?, risk_id = ?, updated_at = ? WHERE id = ?`)
-      .run(i.title, i.description, i.category, i.priority, i.status, i.reported_by, i.owner, i.occurred_at, i.resolved_at, i.resolution, i.control_id, i.risk_id, new Date().toISOString(), req.params.id);
-    if (i.status !== existing.status) {
-      await notifier.notify('incident.status', `Incident ${i.id}: ${i.status}`, [
-        `Stav: ${existing.status} → ${i.status}`,
-        `Vlastník: ${i.owner}`,
-        by(req),
-      ]);
-    }
-    const updated = await db.prepare('SELECT * FROM incidents WHERE id = ?').get(req.params.id);
+    await db.prepare(`UPDATE incidents SET title = ?, description = ?, category = ?, priority = ?, reported_by = ?,
+      owner = ?, occurred_at = ?, control_id = ?, risk_id = ?, updated_at = ? WHERE id = ?`)
+      .run(i.title, i.description, i.category, i.priority, i.reported_by, i.owner, i.occurred_at, i.control_id, i.risk_id, new Date().toISOString(), req.params.id);
+    const updated = await loadIncident(req.params.id);
     await audit.record(req, { entity: 'incident', entityId: updated.id, action: 'update', before: existing, after: updated, label: updated.title });
     res.json(updated);
   });
 
   app.delete('/api/incidents/:id', canDelete, async (req, res) => {
-    const existing = await db.prepare('SELECT * FROM incidents WHERE id = ?').get(req.params.id);
-    if (!existing) throw httpError(404, 'Incident nenalezen');
+    const existing = await loadIncident(req.params.id);
     await db.prepare('DELETE FROM incidents WHERE id = ?').run(req.params.id);
     await notifier.notify('incident.deleted', `Incident ${existing.id} smazán: ${existing.title}`, [by(req)]);
     await audit.record(req, { entity: 'incident', entityId: existing.id, action: 'delete', before: existing, label: existing.title });
     res.status(204).end();
+  });
+
+  // ---------- Workflow incidentu: přiřazení řešiteli + přechody stavu ----------
+
+  app.post('/api/incidents/:id/comments', canWrite, async (req, res) => {
+    need(req.body, 'text');
+    const incident = await loadIncident(req.params.id);
+    await logIncidentActivity(req, incident.id, { type: 'comment', note: String(req.body.text).trim() });
+    res.status(201).json(
+      await db.prepare('SELECT * FROM incident_activity WHERE incident_id = ? ORDER BY at DESC, id DESC LIMIT 1').get(incident.id),
+    );
+  });
+
+  app.post('/api/incidents/:id/assign', canWrite, async (req, res) => {
+    need(req.body, 'user_id');
+    const existing = await loadIncident(req.params.id);
+    if (['Vyřešeno', 'Uzavřeno'].includes(existing.status)) {
+      throw httpError(409, `Nelze přiřadit řešitele ve stavu „${existing.status}"`);
+    }
+    const assignee = await db.prepare('SELECT * FROM users WHERE id = ? AND active = 1').get(req.body.user_id);
+    if (!assignee) throw httpError(400, 'Neplatný nebo neaktivní uživatel');
+    const nextStatus = existing.status === 'Nové' ? 'Přiřazeno' : existing.status;
+    await db.prepare('UPDATE incidents SET assigned_to_user_id = ?, status = ?, updated_at = ? WHERE id = ?')
+      .run(assignee.id, nextStatus, new Date().toISOString(), existing.id);
+    const statusChanged = existing.status !== nextStatus;
+    await logIncidentActivity(req, existing.id, {
+      type: 'assignment',
+      fromStatus: statusChanged ? existing.status : null,
+      toStatus: statusChanged ? nextStatus : null,
+      note: `Přiřazeno: ${assignee.name}`,
+    });
+    const updated = await loadIncident(existing.id);
+    await notifier.notify('incident.assigned', `Incident ${updated.id}: přiřazen řešitel`, [
+      `Řešitel: ${assignee.name}`,
+      ...(statusChanged ? [`Stav: ${existing.status} → ${nextStatus}`] : []),
+      by(req),
+    ]);
+    await audit.record(req, { entity: 'incident', entityId: updated.id, action: 'update', before: existing, after: updated, label: updated.title });
+    res.json(updated);
+  });
+
+  app.post('/api/incidents/:id/start', canWrite, async (req, res) => {
+    await applyIncidentTransition(req, res, 'start');
+  });
+
+  app.post('/api/incidents/:id/pause', canWrite, async (req, res) => {
+    need(req.body, 'reason');
+    await applyIncidentTransition(req, res, 'pause', { note: String(req.body.reason).trim() });
+  });
+
+  app.post('/api/incidents/:id/resume', canWrite, async (req, res) => {
+    await applyIncidentTransition(req, res, 'resume');
+  });
+
+  app.post('/api/incidents/:id/escalate', canWrite, async (req, res) => {
+    const note = req.body?.note ? String(req.body.note).trim() : null;
+    await applyIncidentTransition(req, res, 'escalate', { note });
+  });
+
+  app.post('/api/incidents/:id/resolve', canWrite, async (req, res) => {
+    need(req.body, 'resolution');
+    const resolution = String(req.body.resolution).trim();
+    await applyIncidentTransition(req, res, 'resolve', {
+      extra: { resolution, resolved_at: new Date().toISOString().slice(0, 10) },
+      note: resolution,
+    });
+  });
+
+  app.post('/api/incidents/:id/close', canWrite, async (req, res) => {
+    await applyIncidentTransition(req, res, 'close');
+  });
+
+  app.post('/api/incidents/:id/reopen', canWrite, async (req, res) => {
+    need(req.body, 'reason');
+    const reason = String(req.body.reason).trim();
+    await applyIncidentTransition(req, res, 'reopen', { extra: { resolved_at: null, resolution: null }, note: reason });
   });
 
   // ---------- Školení a FAQ ----------
@@ -676,6 +804,13 @@ export function registerRoutes(app, db, requireRole, notifier, audit) {
 
   app.get('/api/users', canManageUsers, async (req, res) => {
     res.json(await db.prepare(`SELECT ${USER_COLUMNS} FROM users ORDER BY name`).all());
+  });
+
+  // Minimální seznam aktivních uživatelů pro výběr řešitele incidentu — na
+  // rozdíl od GET /api/users (jen manažer) je dostupný komukoli přihlášenému,
+  // aby si i editor mohl v ticketDetail přiřadit řešitele.
+  app.get('/api/users/assignable', async (req, res) => {
+    res.json(await db.prepare("SELECT id, name FROM users WHERE active = 1 ORDER BY name").all());
   });
 
   app.post('/api/users', canManageUsers, async (req, res) => {
