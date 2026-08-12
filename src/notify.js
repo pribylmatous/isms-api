@@ -7,6 +7,8 @@
 // SMTP se konfiguruje přes env: SMTP_HOST, SMTP_PORT (výchozí 587),
 // SMTP_SECURE=1 pro implicitní TLS, SMTP_USER + SMTP_PASS, SMTP_FROM.
 // Bez SMTP_HOST běží dev režim: notifikace se označí 'logged' a vypíší do konzole.
+// SMTP_FORCE_RECIPIENT přesměruje skutečné doručení na jednu adresu (testovací
+// provoz na sdíleném SMTP účtu) — původní příjemci zůstávají v předmětu i v DB.
 
 import nodemailer from 'nodemailer';
 import { renderNotificationEmail } from './emailTemplate.js';
@@ -28,6 +30,7 @@ export function createNotifier(db) {
       })
     : null;
   const from = process.env.SMTP_FROM ?? 'ISMS Portál <isms@cdv.cz>';
+  const forceRecipient = process.env.SMTP_FORCE_RECIPIENT || null;
 
   // Pojistka pro testovací provoz: NOTIFY_ALLOWED_DOMAINS (čárkami oddělené domény)
   // omezí příjemce jen na vyjmenované domény. Ostatní adresy se zahodí (s logem).
@@ -74,7 +77,10 @@ export function createNotifier(db) {
       }
       try {
         await transport.sendMail({
-          from, to: n.recipients, subject: n.subject, text: n.body,
+          from,
+          to: forceRecipient ?? n.recipients,
+          subject: forceRecipient ? `${n.subject} (původní příjemci: ${n.recipients})` : n.subject,
+          text: n.body,
           ...(n.body_html ? { html: n.body_html } : {}),
         });
         await db.prepare("UPDATE notifications SET status = 'sent', sent_at = ? WHERE id = ?").run(new Date().toISOString(), n.id);
@@ -133,6 +139,7 @@ export function createNotifier(db) {
     }, 30_000).unref();
     console.log(smtpConfigured
       ? `Notifikace: SMTP ${process.env.SMTP_HOST} (odesílatel ${from})`
+        + (forceRecipient ? ` — VŠECHNY e-maily přesměrovány na ${forceRecipient}` : '')
       : 'Notifikace: SMTP nenakonfigurováno — dev režim (logování do konzole a outboxu)');
   }
 
